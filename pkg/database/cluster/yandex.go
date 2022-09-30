@@ -172,7 +172,7 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 			return nil
 		},
 	); err != nil {
-		return nil, merry.Prepend(err, "Error then fetching data from settings table")
+		return clusterSettins, merry.Prepend(err, "Error then fetching data from settings table")
 	}
 
 	return clusterSettins, nil
