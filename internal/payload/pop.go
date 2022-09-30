@@ -74,14 +74,19 @@ func (p *BasePayload) Pop(shellState *state.State) error { //nolint //TODO: refa
 				Found:   false,
 			}
 
-			llog.Tracef("Inserting account %v:%v - %v", bic, ban, balance)
 			for {
+				llog.Tracef("Inserting account %v:%v - %v", bic, ban, balance)
 				if err = p.Cluster.InsertAccount(acc); err != nil {
 					if errors.Is(err, cluster.ErrDuplicateKey) {
 						atomic.AddUint64(&stats.duplicates, 1)
 						// Duplicate account means we need to re-generate the values and retry
 						bic, ban = rand.NewBicAndBan()
-						err = nil
+						acc = model.Account{
+							Bic:     bic,
+							Ban:     ban,
+							Balance: balance,
+							Found:   false,
+						}
 						continue
 					}
 					atomic.AddUint64(&stats.errors, 1)
