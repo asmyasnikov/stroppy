@@ -25,10 +25,14 @@ import (
 )
 
 const (
-	schemeErr      string = "Path does not exist"
-	stroppyDir     string = "stroppy"
-	stroppyAgent   string = "stroppy 1.0"
-	defaultTimeout        = time.Second * 5
+	schemeErr    string = "Path does not exist"
+	stroppyDir   string = "stroppy"
+	stroppyAgent string = "stroppy 1.0"
+	// default operation timeout
+	defaultTimeout = time.Second * 10
+	// partitioning settings for accounts and transfers tables
+	partitionsMinCount  = 100
+	partitionsMaxMbytes = 256
 )
 
 type YandexDBCluster struct {
@@ -648,8 +652,8 @@ func createAccountTable(ydbContext context.Context, ydbClient table.Client, pref
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(50),
-					options.WithPartitionSizeMb(256),
+					options.WithMinPartitionsCount(partitionsMinCount),
+					options.WithPartitionSizeMb(partitionsMaxMbytes),
 				),
 			)
 		},
@@ -686,8 +690,8 @@ func createTransferTable(ydbContext context.Context, ydbClient table.Client, pre
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(50),
-					options.WithPartitionSizeMb(256),
+					options.WithMinPartitionsCount(partitionsMinCount),
+					options.WithPartitionSizeMb(partitionsMaxMbytes),
 				),
 			)
 		},
