@@ -12,6 +12,7 @@ import (
 	"github.com/ansel1/merry/v2"
 	"github.com/google/uuid"
 	llog "github.com/sirupsen/logrus"
+	"github.com/ydb-platform/ydb-go-genproto/protos/Ydb"
 	environ "github.com/ydb-platform/ydb-go-sdk-auth-environ"
 	"github.com/ydb-platform/ydb-go-sdk/v3"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
@@ -854,7 +855,7 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) error {
 		},
 		table.WithIdempotent(),
 	); err != nil {
-		if ydb.IsOperationErrorAlreadyExistsError(err) {
+		if ydb.IsOperationError(err, Ydb.StatusIds_PRECONDITION_FAILED) {
 			return ErrDuplicateKey
 		}
 		return merry.Prepend(err, "Error then inserting data into account table")
