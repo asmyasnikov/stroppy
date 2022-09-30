@@ -738,7 +738,7 @@ func recreateTable(
 	if err = ydbClient.Do(
 		ydbContext,
 		func(ctx context.Context, session table.Session) error {
-			if err = session.DropTable(ctx, tablePath); err != nil; {
+			if err = session.DropTable(ctx, tablePath); err != nil {
 				if strings.Contains(err.Error(), schemeErr) {
 					llog.Debugf(
 						"Database table '%s' does not exists at this moment in YDB cluster",
