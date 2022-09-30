@@ -125,7 +125,7 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 				ydbContext,
 				tableFullPath,
 			); err != nil {
-				return merry.Prepend(err, "failed to fetch rows")
+				return err
 			}
 
 			llog.Traceln("Settings successfully fetched from ydb")
@@ -145,7 +145,7 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 						named.OptionalWithDefault("key", &key),
 						named.OptionalWithDefault("value", &value),
 					); err != nil {
-						return merry.Prepend(err, "failed to map fetch result to values")
+						return err
 					}
 					switch key {
 					case "count":
@@ -165,14 +165,14 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 				}
 			}
 
-			if queryResult.Err() != nil {
-				return merry.Prepend(queryResult.Err(), "failed to work with response result")
+			if err = queryResult.Err(); err != nil {
+				return err
 			}
 
 			return nil
 		},
 	); err != nil {
-		return clusterSettins, merry.Prepend(err, "Error then fetching setting from settings table")
+		return nil, merry.Prepend(err, "Error then fetching data from settings table")
 	}
 
 	return clusterSettins, nil
@@ -215,7 +215,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				options.WithKeepInCache(true),
 			)
 			if err != nil {
-				return merry.Prepend(err, "failed to select from accounts table")
+				return err
 			}
 			defer func() {
 				_ = qr.Close()
@@ -231,8 +231,8 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 					return ErrNoRows
 				}
 			}
-			if qr.Err() != nil {
-				return merry.Prepend(qr.Err(), "failed to work with select result")
+			if err = qr.Err(); err != nil {
+				return err
 			}
 
 			// Insert the new row to the transfer table
@@ -272,7 +272,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				options.WithKeepInCache(true),
 			)
 			if err != nil {
-				return merry.Prepend(err, "failed to insert into transfer table")
+				return err
 			}
 
 			// Update two balances in the account table.
@@ -291,7 +291,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				options.WithKeepInCache(true),
 			)
 			if err != nil {
-				return merry.Prepend(err, "failed to execute unified transfer")
+				return err
 			}
 
 			return nil
@@ -325,7 +325,7 @@ func (ydbCluster *YandexDBCluster) FetchAccounts() ([]model.Account, error) {
 					var Balance int64
 					var acc model.Account
 					if err := rows.Scan(&acc.Bic, &acc.Ban, &Balance); err != nil {
-						return merry.Prepend(err, "failed to scan account for FetchAccounts")
+						return err
 					}
 					dec := new(inf.Dec)
 					dec.SetUnscaled(Balance)
@@ -421,12 +421,12 @@ func (ydbCluster *YandexDBCluster) FetchTotal() (*inf.Dec, error) {
 				nil,
 				options.WithKeepInCache(true),
 			); err != nil {
-				return merry.Prepend(err, "failed to execute select query")
+				return err
 			}
 			return nil
 		},
 	); err != nil {
-		return nil, merry.Prepend(err, "failed to do action with table")
+		return nil, merry.Prepend(err, "failed to select totals from checksum table")
 	}
 
 	defer func() {
@@ -449,10 +449,6 @@ func (ydbCluster *YandexDBCluster) FetchTotal() (*inf.Dec, error) {
 	}
 
 	llog.Tracef("Checksum row with name 'total' has amount %d", amount)
-
-	if queryResult.Err() != nil {
-		return nil, merry.Prepend(queryResult.Err(), "failed to work with response result")
-	}
 
 	if amount == 0 {
 		return nil, ErrNoRows
@@ -481,13 +477,13 @@ func (ydbCluster *YandexDBCluster) CheckBalance() (*inf.Dec, error) {
 				nil,
 				options.WithKeepInCache(true),
 			); err != nil {
-				return merry.Prepend(err, "failed to execute select query")
+				return err
 			}
 
 			return nil
 		},
 	); err != nil {
-		return nil, merry.Prepend(err, "failed to do action with table")
+		return nil, merry.Prepend(err, "failed to compute the total balance on the account table")
 	}
 
 	defer func() {
@@ -499,7 +495,7 @@ func (ydbCluster *YandexDBCluster) CheckBalance() (*inf.Dec, error) {
 			if err = queryResult.ScanNamed(
 				named.OptionalWithDefault("total", &totalBalance),
 			); err != nil {
-				return nil, merry.Prepend(err, "failed to map fetch result to values")
+				return nil, err
 			}
 
 			llog.Tracef(
@@ -507,13 +503,6 @@ func (ydbCluster *YandexDBCluster) CheckBalance() (*inf.Dec, error) {
 				totalBalance,
 			)
 		}
-	}
-
-	if queryResult.Err() != nil {
-		return nil, merry.Prepend(
-			queryResult.Err(),
-			"failed to work with response result",
-		)
 	}
 
 	return inf.NewDec(totalBalance, 0), nil
@@ -543,7 +532,7 @@ func (ydbCluster *YandexDBCluster) PersistTotal(total inf.Dec) error {
 				),
 				options.WithKeepInCache(true),
 			); err != nil {
-				return merry.Prepend(err, "failed to execute upsert")
+				return err
 			}
 
 			return nil
@@ -636,7 +625,7 @@ func createSettingsTable(ydbContext context.Context, ydbClient table.Client, pre
 			)
 		},
 	); err != nil {
-		return merry.Prepend(err, "Error then calling createSettingsTable")
+		return err
 	}
 
 	llog.Infoln("Database table 'settings' successfully created in YDB cluster")
@@ -652,7 +641,7 @@ func createAccountTable(ydbContext context.Context, ydbClient table.Client, pref
 		ydbClient,
 		path.Join(prefix, "account"),
 		func(ctx context.Context, session table.Session) error {
-			if err = session.CreateTable(
+			return session.CreateTable(
 				ctx,
 				path.Join(prefix, "account"),
 				options.WithColumn("bic", types.Optional(types.TypeString)),
@@ -665,14 +654,10 @@ func createAccountTable(ydbContext context.Context, ydbClient table.Client, pref
 					options.WithMinPartitionsCount(50),
 					options.WithPartitionSizeMb(256),
 				),
-			); err != nil {
-				return merry.Prepend(err, "Error then calling function for creating table")
-			}
-
-			return nil
+			)
 		},
 	); err != nil {
-		return merry.Prepend(err, "Error then calling createAccountTable")
+		return err
 	}
 
 	llog.Infoln("Database table 'account' successfully created in YDB cluster")
@@ -688,7 +673,7 @@ func createTransferTable(ydbContext context.Context, ydbClient table.Client, pre
 		ydbClient,
 		path.Join(prefix, "transfer"),
 		func(ctx context.Context, session table.Session) error {
-			if err = session.CreateTable(
+			return session.CreateTable(
 				ctx,
 				path.Join(prefix, "transfer"),
 				options.WithColumn("transfer_id", types.Optional(types.TypeString)),
@@ -707,14 +692,10 @@ func createTransferTable(ydbContext context.Context, ydbClient table.Client, pre
 					options.WithMinPartitionsCount(50),
 					options.WithPartitionSizeMb(256),
 				),
-			); err != nil {
-				return merry.Prepend(err, "Error then calling function for creating table")
-			}
-
-			return nil
+			)
 		},
 	); err != nil {
-		return merry.Prepend(err, "Error then createTransferTable")
+		return err
 	}
 
 	llog.Infoln("Database table 'transfer' successfully created in YDB cluster")
@@ -740,7 +721,7 @@ func createChecksumTable(ydbContext context.Context, ydbClient table.Client, pre
 			)
 		},
 	); err != nil {
-		return merry.Prepend(err, "Error then calling createChecksumTable")
+		return err
 	}
 
 	llog.Infoln("Database table 'checksum' successfully created in YDB cluster")
@@ -753,24 +734,20 @@ func recreateTable(
 	ydbClient table.Client,
 	tablePath string,
 	createFunc func(ctx context.Context, session table.Session) error,
-) error {
-	var err error
-
+) (err error) {
 	if err = ydbClient.Do(
 		ydbContext,
 		func(ctx context.Context, session table.Session) error {
-			if err = session.DropTable(
-				ctx,
-				tablePath,
-			); err != nil && strings.Contains(err.Error(), schemeErr) {
-				llog.Debugf(
-					"Database table '%s' does not exists at this moment in YDB cluster",
-					tablePath,
-				)
-			} else {
-				return merry.Prepend(err, "Error inside session.DropTable")
+			if err = session.DropTable(ctx, tablePath); err != nil; {
+				if strings.Contains(err.Error(), schemeErr) {
+					llog.Debugf(
+						"Database table '%s' does not exists at this moment in YDB cluster",
+						tablePath,
+					)
+				} else {
+					return err
+				}
 			}
-
 			return nil
 		},
 	); err != nil {
@@ -841,14 +818,14 @@ func upsertSettings(
 				),
 				options.WithKeepInCache(true),
 			); err != nil {
-				return merry.Prepend(err, "failed to execute upsert")
+				return err
 			}
 
 			return nil
 		},
 		table.WithIdempotent(),
 	); err != nil {
-		return merry.Prepend(err, "Error then inserting data in table")
+		return merry.Prepend(err, "Error then inserting data into settings table")
 	}
 
 	llog.Infoln("Database table settings successfully inserted")
@@ -875,13 +852,13 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) error {
 				),
 				options.WithKeepInCache(true),
 			); err != nil {
-				return merry.Prepend(err, "failed to execute upsert")
+				return err
 			}
 			return nil
 		},
 		table.WithIdempotent(),
 	); err != nil {
-		return merry.Prepend(err, "Error then inserting data in table")
+		return merry.Prepend(err, "Error then inserting data into account table")
 	}
 
 	return nil
