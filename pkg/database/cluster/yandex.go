@@ -87,11 +87,7 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 	tablePath = path.Join(stroppyDir, "account")
 	selectStmnt := insertEscapedPath(srcAndDstYdbSelect, tablePath, tablePath)
 	unifiedStmnt := insertEscapedPath(unifiedTransfer, tablePath, tablePath, tablePath)
-	insertAccStmnt := fmt.Sprintf("DECLARE $bic AS String; "+
-		"DECLARE $ban AS String; DECLARE $balance AS Int64; "+
-		"UPSERT INTO `%s` (bic, ban, balance) VALUES ($bic, $ban, $balance)",
-		tablePath,
-	)
+	insertAccStmnt := insertEscapedPath(insertYdbAccount, tablePath)
 
 	return &YandexDBCluster{
 		ydbConnection: database,
@@ -858,6 +854,9 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) error {
 		},
 		table.WithIdempotent(),
 	); err != nil {
+		if ydb.IsOperationErrorAlreadyExistsError(err) {
+			return ErrDuplicateKey
+		}
 		return merry.Prepend(err, "Error then inserting data into account table")
 	}
 

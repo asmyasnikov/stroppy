@@ -1,6 +1,13 @@
 package cluster
 
 const (
+	insertYdbAccount = `
+DECLARE $bic AS String;
+DECLARE $ban AS String;
+DECLARE $balance AS Int64;
+INSERT INTO %s (bic, ban, balance) VALUES ($bic, $ban, $balance)
+`
+
 	insertYdbTransfer = `
 DECLARE $params AS Struct<
     transfer_id:String, 
@@ -29,6 +36,7 @@ VALUES (
     $params.amount,
     $params.state
 );`
+
 	srcAndDstYdbSelect = `
 DECLARE $params AS Struct<
     src_bic:String,
@@ -50,6 +58,7 @@ SELECT
 FROM %s
 WHERE bic = $params.dst_bic AND ban = $params.dst_ban;
 `
+
 	unifiedTransfer = `
 DECLARE $params AS Struct<
     src_bic:String,
