@@ -79,7 +79,10 @@ func (p *BasePayload) Pop(shellState *state.State) error { //nolint //TODO: refa
 				if err = p.Cluster.InsertAccount(acc); err != nil {
 					if errors.Is(err, cluster.ErrDuplicateKey) {
 						atomic.AddUint64(&stats.duplicates, 1)
-						break
+						// Duplicate account means we need to re-generate the values and retry
+						bic, ban = rand.NewBicAndBan()
+						err = nil
+						continue
 					}
 					atomic.AddUint64(&stats.errors, 1)
 					// description of fdb.error with code 1037 -  "Storage process does not have recent mutations"
