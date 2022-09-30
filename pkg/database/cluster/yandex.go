@@ -32,6 +32,8 @@ const (
 
 type YandexDBCluster struct {
 	ydbConnection ydb.Connection
+	opt_transfer  bool // use the optimized single-statement version of the transfer algo
+	at_megaquery  string
 	at_transfer   string
 	at_select     string
 	at_unified    string
@@ -83,6 +85,8 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 
 	// Build SQL text just once
 	tablePath := path.Join(stroppyDir, "transfer")
+	megaQuery := fmt.Sprintf(singleStatementTransfer,
+		stroppyDir, stroppyDir, stroppyDir, stroppyDir, stroppyDir)
 	transferStmnt := insertEscapedPath(insertYdbTransfer, tablePath)
 	tablePath = path.Join(stroppyDir, "account")
 	selectStmnt := insertEscapedPath(srcAndDstYdbSelect, tablePath, tablePath)
@@ -93,8 +97,18 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 		tablePath,
 	)
 
+	// TODO: configure the setting via command line options
+	useOptTransfer := (os.Getenv("STROPPY_YDB_NOOPT") != "1")
+	if useOptTransfer {
+		llog.Infoln("NOTE: Running with default optimized money transfer algorithm")
+	} else {
+		llog.Infoln("NOTE: Running with non-default 3-statement money transfer algorithm")
+	}
+
 	return &YandexDBCluster{
 		ydbConnection: database,
+		opt_transfer:  useOptTransfer,
+		at_megaquery:  megaQuery,
 		at_transfer:   transferStmnt,
 		at_select:     selectStmnt,
 		at_unified:    unifiedStmnt,
@@ -178,6 +192,176 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 	return clusterSettins, nil
 }
 
+// The "basic" version of atomic transfer.
+// Runs 3 statements sequentially in a single transaction.
+// Commit is performed with the last statement.
+func (ydbCluster *YandexDBCluster) AtomicTransferBasic(
+	transfer *model.Transfer, //nolint
+	clientID uuid.UUID,
+	ctx context.Context,
+	tx table.TransactionActor,
+) (err error) {
+	// Select from account table
+	var qr result.Result
+	qr, err = tx.Execute(
+		ctx, ydbCluster.at_select,
+		table.NewQueryParameters(table.ValueParam(
+			"params", types.StructValue(
+				types.StructFieldValue(
+					"src_bic",
+					types.StringValue([]byte(transfer.Acs[0].Bic)),
+				),
+				types.StructFieldValue(
+					"src_ban",
+					types.StringValue([]byte(transfer.Acs[0].Ban)),
+				),
+				types.StructFieldValue(
+					"dst_bic",
+					types.StringValue([]byte(transfer.Acs[1].Bic)),
+				),
+				types.StructFieldValue(
+					"dst_ban",
+					types.StringValue([]byte(transfer.Acs[1].Ban)),
+				),
+			),
+		)),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return merry.Prepend(err, "failed to select from accounts table")
+	}
+	defer func() {
+		_ = qr.Close()
+	}()
+
+	for qr.NextResultSet(ctx) {
+		if qr.CurrentResultSet().RowCount() != 2 { //nolint // 2 is dst ans src rows count
+			llog.Tracef(
+				"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
+				transfer.Acs[0].Bic, transfer.Acs[0].Ban,
+				transfer.Acs[1].Bic, transfer.Acs[1].Ban,
+			)
+			return ErrNoRows
+		}
+	}
+	if qr.Err() != nil {
+		return merry.Prepend(qr.Err(), "failed to work with select result")
+	}
+
+	// Insert the new row to the transfer table
+	_, err = tx.Execute(
+		ctx, ydbCluster.at_transfer,
+		table.NewQueryParameters(table.ValueParam(
+			"params", types.StructValue(
+				types.StructFieldValue(
+					"transfer_id",
+					types.StringValue([]byte(transfer.Id.String())),
+				),
+				types.StructFieldValue(
+					"src_bic",
+					types.StringValue([]byte(transfer.Acs[0].Bic)),
+				),
+				types.StructFieldValue(
+					"src_ban",
+					types.StringValue([]byte(transfer.Acs[0].Ban)),
+				),
+				types.StructFieldValue(
+					"dst_bic",
+					types.StringValue([]byte(transfer.Acs[1].Bic)),
+				),
+				types.StructFieldValue(
+					"dst_ban",
+					types.StringValue([]byte(transfer.Acs[1].Ban)),
+				),
+				types.StructFieldValue(
+					"amount",
+					types.Int64Value(transfer.Amount.UnscaledBig().Int64()),
+				),
+				types.StructFieldValue(
+					"state",
+					types.StringValue([]byte("complete")),
+				),
+			))),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return merry.Prepend(err, "failed to insert into transfer table")
+	}
+
+	// Update two balances in the account table.
+	_, err = tx.Execute(
+		ctx, ydbCluster.at_unified,
+		table.NewQueryParameters(
+			table.ValueParam("params", types.StructValue(
+				types.StructFieldValue("src_bic", types.StringValue([]byte(transfer.Acs[0].Bic))),
+				types.StructFieldValue("src_ban", types.StringValue([]byte(transfer.Acs[0].Ban))),
+				types.StructFieldValue("dst_bic", types.StringValue([]byte(transfer.Acs[1].Bic))),
+				types.StructFieldValue("dst_ban", types.StringValue([]byte(transfer.Acs[1].Ban))),
+				types.StructFieldValue(
+					"amount",
+					types.Int64Value(transfer.Amount.UnscaledBig().Int64())),
+			))),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return merry.Prepend(err, "failed to execute unified transfer")
+	}
+
+	return nil
+}
+
+// The optimized version of atomic transfer, combining all the logic
+// into the single large statement executed with the autocommit on.
+func (ydbCluster *YandexDBCluster) AtomicTransferOptimized(
+	t *model.Transfer, //nolint
+	clientID uuid.UUID,
+	ctx context.Context,
+	sess table.Session,
+) error {
+	var (
+		qr  result.Result
+		err error
+	)
+
+	// Execute a single multi-statement operator with autocommit
+	_, qr, err = sess.Execute(
+		ctx, table.DefaultTxControl(),
+		ydbCluster.at_megaquery,
+		table.NewQueryParameters(
+			table.ValueParam("transfer_id", types.BytesValueFromString(t.Id.String())),
+			table.ValueParam("src_bic", types.BytesValueFromString(t.Acs[0].Bic)),
+			table.ValueParam("src_ban", types.BytesValueFromString(t.Acs[0].Ban)),
+			table.ValueParam("dst_bic", types.BytesValueFromString(t.Acs[1].Bic)),
+			table.ValueParam("dst_ban", types.BytesValueFromString(t.Acs[1].Ban)),
+			table.ValueParam("amount", types.Int64Value(t.Amount.UnscaledBig().Int64())),
+			table.ValueParam("state", types.BytesValueFromString("complete")),
+		),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return merry.Prepend(err, "failed to execute transfer megastatement")
+	}
+	defer func() {
+		_ = qr.Close()
+	}()
+
+	for qr.NextResultSet(ctx) {
+		if qr.CurrentResultSet().RowCount() != 2 { //nolint // 2 is dst ans src rows count
+			llog.Tracef(
+				"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
+				t.Acs[0].Bic, t.Acs[0].Ban,
+				t.Acs[1].Bic, t.Acs[1].Ban,
+			)
+			return ErrNoRows
+		}
+	}
+	if qr.Err() != nil {
+		return merry.Prepend(qr.Err(), "failed to work with the transfer megastatement result")
+	}
+
+	return nil
+}
+
 func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	transfer *model.Transfer, //nolint
 	clientID uuid.UUID,
@@ -185,120 +369,25 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
-	return ydbCluster.ydbConnection.Table().DoTx(
-		ydbContext,
-		func(ctx context.Context, tx table.TransactionActor) (err error) {
-			// Select from account table
-			var qr result.Result
-			qr, err = tx.Execute(
-				ctx, ydbCluster.at_select,
-				table.NewQueryParameters(table.ValueParam(
-					"params", types.StructValue(
-						types.StructFieldValue(
-							"src_bic",
-							types.StringValue([]byte(transfer.Acs[0].Bic)),
-						),
-						types.StructFieldValue(
-							"src_ban",
-							types.StringValue([]byte(transfer.Acs[0].Ban)),
-						),
-						types.StructFieldValue(
-							"dst_bic",
-							types.StringValue([]byte(transfer.Acs[1].Bic)),
-						),
-						types.StructFieldValue(
-							"dst_ban",
-							types.StringValue([]byte(transfer.Acs[1].Ban)),
-						),
-					),
-				)),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return merry.Prepend(err, "failed to select from accounts table")
-			}
-			defer func() {
-				_ = qr.Close()
-			}()
-
-			for qr.NextResultSet(ctx) {
-				if qr.CurrentResultSet().RowCount() != 2 { //nolint // 2 is dst ans src rows count
-					llog.Tracef(
-						"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
-						transfer.Acs[0].Bic, transfer.Acs[0].Ban,
-						transfer.Acs[1].Bic, transfer.Acs[1].Ban,
-					)
-					return ErrNoRows
-				}
-			}
-			if qr.Err() != nil {
-				return merry.Prepend(qr.Err(), "failed to work with select result")
-			}
-
-			// Insert the new row to the transfer table
-			_, err = tx.Execute(
-				ctx, ydbCluster.at_transfer,
-				table.NewQueryParameters(table.ValueParam(
-					"params", types.StructValue(
-						types.StructFieldValue(
-							"transfer_id",
-							types.StringValue([]byte(transfer.Id.String())),
-						),
-						types.StructFieldValue(
-							"src_bic",
-							types.StringValue([]byte(transfer.Acs[0].Bic)),
-						),
-						types.StructFieldValue(
-							"src_ban",
-							types.StringValue([]byte(transfer.Acs[0].Ban)),
-						),
-						types.StructFieldValue(
-							"dst_bic",
-							types.StringValue([]byte(transfer.Acs[1].Bic)),
-						),
-						types.StructFieldValue(
-							"dst_ban",
-							types.StringValue([]byte(transfer.Acs[1].Ban)),
-						),
-						types.StructFieldValue(
-							"amount",
-							types.Int64Value(transfer.Amount.UnscaledBig().Int64()),
-						),
-						types.StructFieldValue(
-							"state",
-							types.StringValue([]byte("complete")),
-						),
-					))),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return merry.Prepend(err, "failed to insert into transfer table")
-			}
-
-			// Update two balances in the account table.
-			_, err = tx.Execute(
-				ctx, ydbCluster.at_unified,
-				table.NewQueryParameters(
-					table.ValueParam("params", types.StructValue(
-						types.StructFieldValue("src_bic", types.StringValue([]byte(transfer.Acs[0].Bic))),
-						types.StructFieldValue("src_ban", types.StringValue([]byte(transfer.Acs[0].Ban))),
-						types.StructFieldValue("dst_bic", types.StringValue([]byte(transfer.Acs[1].Bic))),
-						types.StructFieldValue("dst_ban", types.StringValue([]byte(transfer.Acs[1].Ban))),
-						types.StructFieldValue(
-							"amount",
-							types.Int64Value(transfer.Amount.UnscaledBig().Int64())),
-					))),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return merry.Prepend(err, "failed to execute unified transfer")
-			}
-
-			return nil
-		},
-		// Mark the transaction idempotent to allow retries.
-		table.WithIdempotent(),
-	)
+	if ydbCluster.opt_transfer {
+		// Single-statement version with autocommit
+		return ydbCluster.ydbConnection.Table().Do(
+			ydbContext,
+			func(ctx context.Context, sess table.Session) (err error) {
+				return ydbCluster.AtomicTransferOptimized(transfer, clientID, ctx, sess)
+			},
+			table.WithIdempotent(),
+		)
+	} else {
+		// Multi-statement version with explicit transaction
+		return ydbCluster.ydbConnection.Table().DoTx(
+			ydbContext,
+			func(ctx context.Context, tx table.TransactionActor) (err error) {
+				return ydbCluster.AtomicTransferBasic(transfer, clientID, ctx, tx)
+			},
+			table.WithIdempotent(),
+		)
+	}
 }
 
 func (ydbCluster *YandexDBCluster) FetchAccounts() ([]model.Account, error) {

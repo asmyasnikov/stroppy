@@ -77,4 +77,50 @@ $shared_select = (
 UPDATE %s ON
 SELECT * FROM $shared_select;
 `
+
+	singleStatementTransfer = `
+DECLARE $transfer_id AS String;
+DECLARE $src_bic AS String;
+DECLARE $src_ban AS String;
+DECLARE $dst_bic AS String;
+DECLARE $dst_ban AS String;
+DECLARE $amount AS Int64;
+DECLARE $state AS String;
+
+$count = SELECT COUNT(*) AS rows FROM (
+    SELECT 1 FROM ` + "`%s/account`" + `
+    WHERE (bic = $src_bic AND ban = $src_ban)
+       OR (bic = $dst_bic AND ban = $dst_ban)
+);
+
+$acc_rows = (
+    SELECT bic, ban, balance - $amount AS balance
+    FROM ` + "`%s/account`" + `
+    WHERE bic = $src_bic AND ban = $src_ban AND $count = 2
+    UNION ALL
+    SELECT bic, ban, balance + $amount as balance
+    FROM ` + "`%s/account`" + `
+    WHERE bic = $dst_bic AND ban = $dst_ban AND $count = 2
+);
+
+$trans_rows = (
+    SELECT $transfer_id AS transfer_id,
+      $src_bic AS src_bic,
+      $src_ban AS src_ban,
+      $dst_bic AS dst_bic,
+      $dst_ban AS dst_ban,
+      $amount AS amount,
+      $state AS state
+    FROM (SELECT 1 AS x) y
+    WHERE $count = 2
+);
+
+UPSERT INTO ` + "`%s/transfer`" + `
+  SELECT * FROM $trans_rows;
+
+UPSERT INTO ` + "`%s/account`" + `
+  SELECT * FROM $acc_rows;
+
+SELECT balance FROM $acc_rows;
+`
 )
