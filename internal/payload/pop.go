@@ -83,7 +83,6 @@ func (p *BasePayload) Pop(shellState *state.State) error { //nolint //TODO: refa
 						atomic.AddUint64(&stats.duplicates, 1)
 						// Duplicate account means we need to re-generate the values and retry
 						bic, ban := rand.NewBicAndBan()
-						balance := rand.NewStartBalance()
 						acc = model.Account{
 							Bic:     bic,
 							Ban:     ban,
