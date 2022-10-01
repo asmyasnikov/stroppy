@@ -14,6 +14,7 @@ import (
 	"gitlab.com/picodata/stroppy/internal/deployment"
 	"gitlab.com/picodata/stroppy/pkg/database/config"
 	"gitlab.com/picodata/stroppy/pkg/state"
+	"gitlab.com/picodata/stroppy/pkg/statistics"
 	"gopkg.in/inf.v0"
 )
 
@@ -29,6 +30,8 @@ func newPopCommand(settings *config.Settings) *cobra.Command {
 		},
 
 		Run: func(cmd *cobra.Command, args []string) {
+			statistics.StatsSetTotal(settings.DatabaseSettings.Count)
+
 			if settings.EnableProfile {
 				go func() {
 					llog.Infoln(http.ListenAndServe("localhost:6060", nil))
