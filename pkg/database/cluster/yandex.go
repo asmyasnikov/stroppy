@@ -776,9 +776,7 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) (err error) 
 		table.WithIdempotent(),
 	); err != nil {
 		if ydb.IsOperationError(err, Ydb.StatusIds_PRECONDITION_FAILED) {
-			temp := merry.Wrap(ErrDuplicateKey)
-			llog.Infof("Duplicate! %v", temp)
-			return temp
+			return merry.Wrap(ErrDuplicateKey)
 		}
 		return merry.Prepend(err, "Error then inserting data into account table")
 	}
