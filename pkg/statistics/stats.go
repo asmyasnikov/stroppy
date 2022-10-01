@@ -69,18 +69,19 @@ loop:
 			if s.summary.n_requests > 0 {
 				var progress string
 				if s.n_total > 0 {
-					progress = fmt.Sprintf("%5s%% done, RPS %d, %10d requests",
+					progress = fmt.Sprintf("%5s%% done, RPS %d, %10d requests of %10d",
 						fmt.Sprintf("%.2f", float64(s.summary.n_requests)/float64(s.n_total)*100),
-						s.periodic.n_requests/5, s.summary.n_requests)
+						s.periodic.n_requests/5, s.summary.n_requests, s.n_total)
 				} else {
 					progress = fmt.Sprintf("Done %10d requests", s.summary.n_requests)
 				}
 
-				llog.Infof("%s, Latency min/max/med: %.3fs/%.3fs/%.3fs",
+				llog.Infof("%s, Latency min/max/med/99%%: %.3fs/%.3fs/%.3fs/%.3fs",
 					progress,
 					s.periodic.latency_min.Seconds(),
 					s.periodic.latency_max.Seconds(),
-					s.periodic.tdigest.Quantile(0.5),
+					s.periodic.tdigest.Quantile(0.50),
+					s.periodic.tdigest.Quantile(0.99),
 				)
 				s.periodic.Reset()
 			}
