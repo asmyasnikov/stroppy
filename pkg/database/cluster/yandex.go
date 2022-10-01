@@ -679,7 +679,7 @@ func recreateTable(
 		return merry.Prepend(err, fmt.Sprintf("Error then creating '%s' table", tablePath))
 	}
 
-	llog.Infoln("Database table '%s' successfully created in YDB cluster", tablePath)
+	llog.Infof("Table created: %s", tablePath)
 	return nil
 }
 
@@ -705,7 +705,7 @@ func createStroppyDirectory(
 		)
 	}
 
-	llog.Infof("Database directory '%s' successfully created in YDB cluster", ydbDirPath)
+	llog.Infof("Directory created: %s", ydbDirPath)
 
 	return nil
 }
@@ -752,9 +752,7 @@ func upsertSettings(
 	return nil
 }
 
-func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) error {
-	var err error
-
+func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) (err error) {
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
@@ -778,7 +776,9 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) error {
 		table.WithIdempotent(),
 	); err != nil {
 		if ydb.IsOperationError(err, Ydb.StatusIds_PRECONDITION_FAILED) {
-			return merry.Wrap(ErrDuplicateKey)
+			temp := merry.Wrap(ErrDuplicateKey)
+			llog.Infof("Duplicate! %v", temp)
+			return temp
 		}
 		return merry.Prepend(err, "Error then inserting data into account table")
 	}
