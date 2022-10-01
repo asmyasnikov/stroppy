@@ -58,7 +58,7 @@ type Cookie struct {
 }
 
 func statsWorker() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	var more bool
 loop:
@@ -69,9 +69,9 @@ loop:
 			if s.summary.n_requests > 0 {
 				var progress string
 				if s.n_total > 0 {
-					progress = fmt.Sprintf("%5s%% done, RPS %d",
+					progress = fmt.Sprintf("%5s%% done, RPS %d, %10d requests",
 						fmt.Sprintf("%.2f", float64(s.summary.n_requests)/float64(s.n_total)*100),
-						s.periodic.n_requests)
+						s.periodic.n_requests/5, s.summary.n_requests)
 				} else {
 					progress = fmt.Sprintf("Done %10d requests", s.summary.n_requests)
 				}
