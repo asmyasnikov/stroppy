@@ -96,8 +96,8 @@ loop:
 	s.done <- true
 }
 
-func StatsSetTotal(n int64) {
-	s.n_total = n
+func StatsSetTotal(n int) {
+	s.n_total = int64(n)
 	llog.Infof("Total operationz: %d", s.n_total)
 }
 
