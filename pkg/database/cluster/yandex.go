@@ -221,20 +221,21 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				}
 				for qr.NextRow() {
 					var srcdst int32
-					var balance int64
+					var balance *int64
 					if err := qr.Scan(&srcdst, &balance); err != nil {
 						return merry.Prepend(err, "failed to scan account balance")
 					}
+					if balance == nil {
+						return merry.New("Illegal nil output value of balance column for srcdst account statement")
+					}
 					switch srcdst {
 					case 1: // need to check the source account balance
-						if balance < amount {
+						if *balance < amount {
 							return ErrInsufficientFunds
 						}
-						break
-					case 2: // nothing to do
-						break
+					case 2: // nothing to do on the destination account
 					default: // something strange to be reported
-						return merry.Errorf("Illegal srcdst output column value %d", srcdst)
+						return merry.Errorf("Illegal srcdst value %d for srcdst account statement", srcdst)
 					}
 				}
 			}
