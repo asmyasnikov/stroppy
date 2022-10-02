@@ -79,7 +79,7 @@ UPDATE "&{stroppyDir}/account" ON
 SELECT * FROM $shared_select;
 `
 
-	ydbSelectBalanceAccount = `
+	yqlSelectBalanceAccount = `
 DECLARE $bic AS String; DECLARE $ban AS String;
 SELECT balance, CAST(0 AS Int64) AS pending
 FROM "&{stroppyDir}/account"

@@ -41,7 +41,7 @@ type YandexDBCluster struct {
 	yqlUpsertTransfer       string
 	yqlSelectSrcDstAcc      string
 	yqlUpsertSrcDstAcc      string
-	ydbSelectBalanceAccount string
+	yqlSelectBalanceAccount string
 }
 
 func envExists(key string) bool {
@@ -93,7 +93,7 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 		yqlSelectSrcDstAcc:      expandYql(yqlSelectSrcDstAccount),
 		yqlUpsertSrcDstAcc:      expandYql(yqlUpsertSrcDstAccount),
 		yqlInsertAccount:        expandYql(yqlInsertAccount),
-		ydbSelectBalanceAccount: expandYql(ydbSelectBalanceAccount),
+		yqlSelectBalanceAccount: expandYql(yqlSelectBalanceAccount),
 	}, nil
 }
 
@@ -332,7 +332,7 @@ func (ydbCluster *YandexDBCluster) FetchBalance(
 		func(ydbContext context.Context, ydbSession table.Session) error {
 			if _, rows, err = ydbSession.Execute(
 				ydbContext, table.OnlineReadOnlyTxControl(),
-				ydbCluster.ydbSelectBalanceAccount,
+				ydbCluster.yqlSelectBalanceAccount,
 				table.NewQueryParameters(
 					table.ValueParam("bic", types.BytesValueFromString(bic)),
 					table.ValueParam("ban", types.BytesValueFromString(ban)),
