@@ -84,7 +84,7 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 	}
 
 	if err != nil {
-		return nil, merry.Prepend(err, "Error then creating YDB connection holder")
+		return nil, merry.Prepend(err, "Error creating YDB connection holder")
 	}
 
 	return &YandexDBCluster{
@@ -167,7 +167,7 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 			return nil
 		},
 	); err != nil {
-		return clusterSettins, merry.Prepend(err, "Error then fetching data from settings table")
+		return clusterSettins, merry.Prepend(err, "Error fetching data from settings table")
 	}
 
 	return clusterSettins, nil
@@ -672,11 +672,11 @@ func recreateTable(
 			return nil
 		},
 	); err != nil {
-		return merry.Prepend(err, fmt.Sprintf("Error then droping '%s' table", tablePath))
+		return merry.Prepend(err, fmt.Sprintf("Error droping table %s", tablePath))
 	}
 
 	if err = ydbClient.Do(ydbContext, createFunc); err != nil {
-		return merry.Prepend(err, fmt.Sprintf("Error then creating '%s' table", tablePath))
+		return merry.Prepend(err, fmt.Sprintf("Error creating table %s", tablePath))
 	}
 
 	llog.Infof("Table created: %s", tablePath)
@@ -701,7 +701,7 @@ func createStroppyDirectory(
 	); err != nil {
 		return merry.Prepend(
 			err,
-			fmt.Sprintf("Error then creating directory %s in YDB", ydbDirPath),
+			fmt.Sprintf("Error creating directory %s", ydbDirPath),
 		)
 	}
 
@@ -745,7 +745,7 @@ func upsertSettings(
 		},
 		table.WithIdempotent(),
 	); err != nil {
-		return merry.Prepend(err, "Error then inserting data into settings table")
+		return merry.Prepend(err, "Error inserting data into settings table")
 	}
 
 	llog.Infoln("Settings successfully inserted")
@@ -778,7 +778,7 @@ func (ydbCluster *YandexDBCluster) InsertAccount(acc model.Account) (err error) 
 		if ydb.IsOperationError(err, Ydb.StatusIds_PRECONDITION_FAILED) {
 			return merry.Wrap(ErrDuplicateKey)
 		}
-		return merry.Prepend(err, "Error then inserting data into account table")
+		return merry.Prepend(err, "Error inserting data into account table")
 	}
 
 	return nil
