@@ -36,12 +36,12 @@ const (
 )
 
 type YandexDBCluster struct {
-	ydbConnection           ydb.Connection
-	yqlInsertAccount        string
-	yqlUpsertTransfer       string
-	yqlSelectSrcDstAcc      string
-	yqlUpsertSrcDstAcc      string
-	ydbSelectBalanceAccount string
+	ydbConnection       ydb.Connection
+	yqlInsertAccount    string
+	yqlUpsertTransfer   string
+	yqlSelectSrcDstAcc  string
+	yqlUpsertSrcDstAcc  string
+	yqlSelectBalanceAcc string
 }
 
 func envExists(key string) bool {
@@ -88,12 +88,12 @@ func NewYandexDBCluster(ydbContext context.Context, dbURL string, poolSize int) 
 	}
 
 	return &YandexDBCluster{
-		ydbConnection:           database,
-		yqlUpsertTransfer:       expandYql(yqlUpsertTransfer),
-		yqlSelectSrcDstAcc:      expandYql(yqlSelectSrcDstAccount),
-		yqlUpsertSrcDstAcc:      expandYql(yqlUpsertSrcDstAccount),
-		yqlInsertAccount:        expandYql(yqlInsertAccount),
-		ydbSelectBalanceAccount: expandYql(ydbSelectBalanceAccount),
+		ydbConnection:       database,
+		yqlUpsertTransfer:   expandYql(yqlUpsertTransfer),
+		yqlSelectSrcDstAcc:  expandYql(yqlSelectSrcDstAccount),
+		yqlUpsertSrcDstAcc:  expandYql(yqlUpsertSrcDstAccount),
+		yqlInsertAccount:    expandYql(yqlInsertAccount),
+		yqlSelectBalanceAcc: expandYql(yqlSelectBalanceAccount),
 	}, nil
 }
 
@@ -180,6 +180,8 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
+	amount := transfer.Amount.UnscaledBig().Int64()
+
 	return ydbCluster.ydbConnection.Table().DoTx(
 		ydbContext,
 		func(ctx context.Context, tx table.TransactionActor) (err error) {
@@ -207,13 +209,33 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 			}()
 
 			for qr.NextResultSet(ctx) {
-				if qr.CurrentResultSet().RowCount() != 2 { //nolint // 2 is dst ans src rows count
+				// Expect to have 2 rows - source and destination accounts.
+				// In case of 0 or 1 rows something is missing.
+				if qr.CurrentResultSet().RowCount() != 2 {
 					llog.Tracef(
 						"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
 						transfer.Acs[0].Bic, transfer.Acs[0].Ban,
 						transfer.Acs[1].Bic, transfer.Acs[1].Ban,
 					)
 					return ErrNoRows
+				}
+				for qr.NextRow() {
+					var srcdst int32
+					var balance int64
+					if err := qr.Scan(&srcdst, &balance); err != nil {
+						return merry.Prepend(err, "failed to scan account balance")
+					}
+					switch srcdst {
+					case 1: // need to check the source account balance
+						if balance < amount {
+							return ErrInsufficientFunds
+						}
+						break
+					case 2: // nothing to do
+						break
+					default: // something strange to be reported
+						return merry.Errorf("Illegal srcdst output column value %d", srcdst)
+					}
 				}
 			}
 			if err = qr.Err(); err != nil {
@@ -235,7 +257,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 					table.ValueParam("dst_ban",
 						types.BytesValueFromString(transfer.Acs[1].Ban)),
 					table.ValueParam("amount",
-						types.Int64Value(transfer.Amount.UnscaledBig().Int64())),
+						types.Int64Value(amount)),
 					table.ValueParam("state",
 						types.BytesValueFromString("complete")),
 				),
@@ -332,7 +354,7 @@ func (ydbCluster *YandexDBCluster) FetchBalance(
 		func(ydbContext context.Context, ydbSession table.Session) error {
 			if _, rows, err = ydbSession.Execute(
 				ydbContext, table.OnlineReadOnlyTxControl(),
-				ydbCluster.ydbSelectBalanceAccount,
+				ydbCluster.yqlSelectBalanceAcc,
 				table.NewQueryParameters(
 					table.ValueParam("bic", types.BytesValueFromString(bic)),
 					table.ValueParam("ban", types.BytesValueFromString(ban)),

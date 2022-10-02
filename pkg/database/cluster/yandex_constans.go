@@ -38,17 +38,11 @@ DECLARE $src_bic AS String;
 DECLARE $src_ban AS String;
 DECLARE $dst_bic AS String;
 DECLARE $dst_ban AS String;
-SELECT 
-    bic,
-    ban,
-    balance
+SELECT 1 AS srcdst, balance
 FROM "&{stroppyDir}/account"
 WHERE bic = $src_bic AND ban = $src_ban
 UNION ALL
-SELECT 
-    bic,
-    ban,
-    balance
+SELECT 2 AS srcdst, balance
 FROM "&{stroppyDir}/account"
 WHERE bic = $dst_bic AND ban = $dst_ban;
 `
@@ -79,7 +73,7 @@ UPDATE "&{stroppyDir}/account" ON
 SELECT * FROM $shared_select;
 `
 
-	ydbSelectBalanceAccount = `
+	yqlSelectBalanceAccount = `
 DECLARE $bic AS String; DECLARE $ban AS String;
 SELECT balance, CAST(0 AS Int64) AS pending
 FROM "&{stroppyDir}/account"
