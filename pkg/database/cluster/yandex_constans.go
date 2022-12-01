@@ -69,7 +69,7 @@ $shared_select = (
     WHERE bic = $dst_bic AND ban = $dst_ban
 );
 
-UPDATE "&{stroppyDir}/account" ON
+UPSERT INTO "&{stroppyDir}/account"
 SELECT * FROM $shared_select;
 `
 

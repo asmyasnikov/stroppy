@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"crypto/sha1"
+
 	"github.com/ansel1/merry/v2"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -32,8 +34,8 @@ const (
 	// default operation timeout.
 	defaultTimeout = time.Second * 10
 	// partitioning settings for accounts and transfers tables.
-	partitionsMinCount  = 100
-	partitionsMaxMbytes = 12
+	partitionsMinCount  = 300
+	partitionsMaxMbytes = 512
 	poolSizeOverhead    = 10
 )
 
@@ -69,7 +71,7 @@ func NewYandexDBCluster(
 	dbURL string,
 	poolSize uint64,
 ) (*YandexDBCluster, error) {
-	llog.Infof("Establishing connection to YDB on %s with poolSize %d", dbURL, poolSize)
+	llog.Infof("Establishing connection to YDB on %s with poolSize %d, SDK version %s", dbURL, poolSize, ydb.Version)
 
 	var (
 		database ydb.Connection
@@ -185,6 +187,12 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 	return clusterSettins, nil
 }
 
+func transferIdToHash(transferId *model.TransferId) []byte {
+	hasher := sha1.New()
+	hasher.Write(transferId[:])
+	return hasher.Sum(nil)
+}
+
 func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	transfer *model.Transfer, //nolint
 	clientID uuid.UUID,
@@ -195,6 +203,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	defer ctxCloseFn()
 
 	amount := transfer.Amount.UnscaledBig().Int64()
+	transferId := transferIdToHash(&transfer.Id)
 
 	if err = ydbCluster.ydbConnection.Table().DoTx(
 		ydbContext,
@@ -266,7 +275,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				ctx, ydbCluster.yqlUpsertTransfer,
 				table.NewQueryParameters(
 					table.ValueParam("transfer_id",
-						types.BytesValueFromString(transfer.Id.String())),
+						types.BytesValue(transferId)),
 					table.ValueParam("src_bic",
 						types.BytesValueFromString(transfer.Acs[0].Bic)),
 					table.ValueParam("src_ban",
