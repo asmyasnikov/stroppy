@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"crypto/sha1"
+	"encoding/base64"
 
 	"github.com/ansel1/merry/v2"
 	"github.com/google/uuid"
@@ -187,10 +188,10 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 	return clusterSettins, nil
 }
 
-func transferIdToHash(transferId *model.TransferId) []byte {
+func transferIdToHash(transferId *model.TransferId) string {
 	hasher := sha1.New()
 	hasher.Write(transferId[:])
-	return hasher.Sum(nil)
+	return base64.URLEncoding.EncodeToString(hasher.Sum(nil))
 }
 
 func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
@@ -275,7 +276,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 				ctx, ydbCluster.yqlUpsertTransfer,
 				table.NewQueryParameters(
 					table.ValueParam("transfer_id",
-						types.BytesValue(transferId)),
+						types.BytesValueFromString(transferId)),
 					table.ValueParam("src_bic",
 						types.BytesValueFromString(transfer.Acs[0].Bic)),
 					table.ValueParam("src_ban",
