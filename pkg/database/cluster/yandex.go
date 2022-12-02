@@ -169,38 +169,34 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
-	tableFullPath := path.Join(ydbCluster.ydbConnection.Name(), stroppyDir, "settings")
+	tablePath := path.Join(stroppyDir, "settings")
+	selectStmnt := fmt.Sprintf("SELECT key, value FROM `%s`", tablePath)
 
 	if err = ydbCluster.ydbConnection.Table().Do(
 		ydbContext,
 		func(ydbContext context.Context, ydbSession table.Session) error {
-			var queryResult result.StreamResult
-			if queryResult, err = ydbSession.StreamReadTable(
-				ydbContext,
-				tableFullPath,
-			); err != nil {
-				return errors.Wrap(err, "failed to reading table in stream")
+			var rows result.Result
+			_, rows, err = ydbSession.Execute(ydbContext, table.DefaultTxControl(), selectStmnt, nil)
+			if err != nil {
+				return err
 			}
-
-			llog.Traceln("Settings successfully fetched from ydb")
-
 			defer func() {
-				_ = queryResult.Close()
+				_ = rows.Close()
 			}()
 
 			var (
 				key   string
 				value string
 			)
-
-			for queryResult.NextResultSet(ydbContext) {
-				for queryResult.NextRow() {
-					if err = queryResult.ScanNamed(
+			for rows.NextResultSet(ydbContext) {
+				for rows.NextRow() {
+					if err = rows.ScanNamed(
 						named.OptionalWithDefault("key", &key),
 						named.OptionalWithDefault("value", &value),
 					); err != nil {
-						return errors.Wrap(err, "failed ot scan parameters")
+						return err
 					}
+					llog.Tracef("Settings{ key: %s, value: %s }", key, value)
 					switch key {
 					case "count":
 						if clusterSettins.Count, err = strconv.Atoi(value); err != nil {
@@ -211,16 +207,7 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 							return errors.Wrap(err, "failed to convert seed into integer")
 						}
 					}
-					llog.Tracef(
-						"Settings{ key: %s, value: %s }",
-						key,
-						value,
-					)
 				}
-			}
-
-			if err = queryResult.Err(); err != nil {
-				return errors.Wrap(err, "failed retrieve query result")
 			}
 
 			return nil
@@ -395,7 +382,7 @@ func (ydbCluster *YandexDBCluster) FetchAccounts() ([]model.Account, error) {
 
 			rows, err = sess.StreamExecuteScanQuery(ctx, selectStmnt, nil)
 			if err != nil {
-				return errors.Wrap(err, "failed to execute scan query")
+				return errors.Wrap(err, "failed to execute scan query on account table")
 			}
 			defer func() {
 				_ = rows.Close()
@@ -666,13 +653,12 @@ func (ydbCluster *YandexDBCluster) createSettingsTable( //nolint:dupl // because
 				options.WithColumn("value", types.Optional(types.TypeString)),
 				options.WithPrimaryKeyColumn("key"),
 			); err != nil {
-				return errors.Wrap(err, "failed to create table")
+				return err
 			}
-
 			return nil
 		},
 	); err != nil {
-		return errors.Wrap(err, "failed to recreate settings table")
+		return errors.Wrap(err, "failed to (re)create settings table")
 	}
 
 	return nil
@@ -683,6 +669,14 @@ func (ydbCluster *YandexDBCluster) createAccountTable(
 	prefix string,
 ) error {
 	var err error
+
+	partitionsMinCount := ydbCluster.partitionsMinCount
+	if partitionsMinCount < 10 {
+		partitionsMinCount = 10
+	} else if partitionsMinCount > 10000 {
+		partitionsMinCount = 10000
+	}
+	partitionsMaxCount := partitionsMinCount + 10 + (ydbCluster.partitionsMinCount / 10)
 
 	tabname := path.Join(prefix, "account")
 	if err = recreateTable(
@@ -697,17 +691,17 @@ func (ydbCluster *YandexDBCluster) createAccountTable(
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(uint64(ydbCluster.partitionsMinCount)),
+					options.WithMinPartitionsCount(uint64(partitionsMinCount)),
+					options.WithMaxPartitionsCount(uint64(partitionsMaxCount)),
 					options.WithPartitionSizeMb(uint64(ydbCluster.partitionsMaxSize)),
 				),
 			); err != nil {
-				return errors.Wrap(err, "failed to create table")
+				return err
 			}
-
 			return nil
 		},
 	); err != nil {
-		return errors.Wrap(err, "failed to recreate account table")
+		return errors.Wrap(err, "failed to (re)create account table")
 	}
 
 	return nil
@@ -718,6 +712,14 @@ func (ydbCluster *YandexDBCluster) createTransferTable(
 	prefix string,
 ) error {
 	var err error
+
+	partitionsMinCount := ydbCluster.partitionsMinCount
+	if partitionsMinCount < 10 {
+		partitionsMinCount = 10
+	} else if partitionsMinCount > 10000 {
+		partitionsMinCount = 10000
+	}
+	partitionsMaxCount := partitionsMinCount + 10 + (ydbCluster.partitionsMinCount / 10)
 
 	tabname := path.Join(prefix, "transfer")
 	if err = recreateTable(
@@ -738,17 +740,17 @@ func (ydbCluster *YandexDBCluster) createTransferTable(
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(uint64(ydbCluster.partitionsMinCount)),
+					options.WithMinPartitionsCount(uint64(partitionsMinCount)),
+					options.WithMaxPartitionsCount(uint64(partitionsMaxCount)),
 					options.WithPartitionSizeMb(uint64(ydbCluster.partitionsMaxSize)),
 				),
 			); err != nil {
-				return errors.Wrap(err, "failed to create table")
+				return err
 			}
-
 			return nil
 		},
 	); err != nil {
-		return errors.Wrap(err, "failed to recreate account table")
+		return errors.Wrap(err, "failed to (re)create transfer table")
 	}
 
 	return nil
@@ -770,13 +772,13 @@ func (ydbCluster *YandexDBCluster) createChecksumTable( //nolint:dupl // because
 				options.WithColumn("amount", types.Optional(types.TypeInt64)),
 				options.WithPrimaryKeyColumn("name"),
 			); err != nil {
-				return errors.Wrap(err, "failed to create table")
+				return err
 			}
 
 			return nil
 		},
 	); err != nil {
-		return errors.Wrap(err, "failed to recreate checksum table")
+		return errors.Wrap(err, "failed to (re)create checksum table")
 	}
 
 	return nil

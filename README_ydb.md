@@ -6,6 +6,6 @@ To support the authentication methods specific to YDB Managed Service, stroppy u
 * `YDB_ACCESS_TOKEN_CREDENTIALS` - YDB access token. When configured, the access token is passed as is to authenticate the connection.
 
 In addition, there are the following YDB-specific environment variables:
-* `YDB_STROPPY_HASH_TRANSFER_ID` - when set to `1`, Base64-encoded SHA-1 hash is written for `transfer_id` field in the `transfer` table;
-* `YDB_STROPPY_PARTITIONS_COUNT` - [`AUTO_PARTITIONING_MIN_PARTITIONS_COUNT`](https://ydb.tech/en/docs/concepts/datamodel/table#auto_partitioning_partition_size_mb) setting value for `account` and `transfer` tables;
-* `YDB_STROPPY_PARTITIONS_SIZE` - [`AUTO_PARTITIONING_PARTITION_SIZE_MB`](https://ydb.tech/en/docs/concepts/datamodel/table#auto_partitioning_min_partitions_count) setting value for `account` and `transfer` tables.
+* `YDB_STROPPY_HASH_TRANSFER_ID` - when set to `1`, the actual value of `transfer_id` field in the `transfer` table is replaced with its SHA-1 hash code (Base-64 encoded). This setting only affects the `pay` operation mode.
+* `YDB_STROPPY_PARTITIONS_COUNT` - [`AUTO_PARTITIONING_MIN_PARTITIONS_COUNT`](https://ydb.tech/en/docs/concepts/datamodel/table#auto_partitioning_partition_size_mb) setting value for `account` and `transfer` tables. This setting only affects the `pop` operation mode.
+* `YDB_STROPPY_PARTITIONS_SIZE` - [`AUTO_PARTITIONING_PARTITION_SIZE_MB`](https://ydb.tech/en/docs/concepts/datamodel/table#auto_partitioning_min_partitions_count) setting value for `account` and `transfer` tables. This setting only affects the `pop` operation mode.
