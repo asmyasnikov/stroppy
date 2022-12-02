@@ -34,10 +34,8 @@ const (
 	stroppyAgent string = "stroppy 1.0"
 	// default operation timeout.
 	defaultTimeout = time.Second * 10
-	// partitioning settings for accounts and transfers tables.
-	partitionsMinCount  = 300
-	partitionsMaxMbytes = 512
-	poolSizeOverhead    = 10
+	// extra connections in the pool.
+	poolSizeOverhead = 10
 )
 
 var errIllegalNilOutput = errors.New(
@@ -51,6 +49,9 @@ type YandexDBCluster struct {
 	yqlSelectSrcDstAcc  string
 	yqlUpsertSrcDstAcc  string
 	yqlSelectBalanceAcc string
+	transferIdHashing   bool
+	partitionsMaxSize   int
+	partitionsMinCount  int
 }
 
 func envExists(key string) bool {
@@ -67,12 +68,52 @@ func envConfigured() bool {
 		envExists("YDB_ACCESS_TOKEN_CREDENTIALS"))
 }
 
+func envTransferIdHashing() bool {
+	if value, ok := os.LookupEnv("YDB_STROPPY_HASH_TRANSFER_ID"); ok {
+		if (value == "1") || (value == "Y") {
+			llog.Infoln("YDB transfer id hashing is ENABLED")
+			return true
+		}
+	}
+	llog.Infoln("YDB transfer id hashing is DISABLED")
+	return false
+}
+
+func envPartitionsMinCount() int {
+	ret := 300
+	if value, ok := os.LookupEnv("YDB_STROPPY_PARTITIONS_COUNT"); ok {
+		x, err := strconv.Atoi(value)
+		if err != nil || x <= 0 || x > 10000 {
+			llog.Warningln("Illegal value [%s] passed in YDB_STROPPY_PARTITIONS_COUNT, ignored", value)
+		} else {
+			ret = x
+		}
+	}
+	llog.Infoln("Using YDB minimal partition count ", ret)
+	return ret
+}
+
+func envPartitionsMaxSize() int {
+	ret := 512
+	if value, ok := os.LookupEnv("YDB_STROPPY_PARTITIONS_SIZE"); ok {
+		x, err := strconv.Atoi(value)
+		if err != nil || x <= 0 || x > 10000 {
+			llog.Warningln("Illegal value [%s] passed in YDB_STROPPY_PARTITIONS_SIZE, ignored", value)
+		} else {
+			ret = x
+		}
+	}
+	llog.Infoln("Using YDB maximum partition size ", ret)
+	return ret
+}
+
 func NewYandexDBCluster(
 	ydbContext context.Context,
 	dbURL string,
 	poolSize uint64,
 ) (*YandexDBCluster, error) {
-	llog.Infof("Establishing connection to YDB on %s with poolSize %d, SDK version %s", dbURL, poolSize, ydb.Version)
+	llog.Infof("YDB Go SDK version %s", ydb.Version)
+	llog.Infof("Establishing connection to YDB on %s with poolSize %d", dbURL, poolSize)
 
 	var (
 		database ydb.Connection
@@ -80,7 +121,7 @@ func NewYandexDBCluster(
 	)
 
 	if envConfigured() {
-		llog.Infoln("NOTE: YDB connection credentials are configured through the environment")
+		llog.Infoln("YDB connection credentials are configured through the environment")
 
 		database, err = ydb.Open(ydbContext, dbURL,
 			ydb.WithUserAgent(stroppyAgent),
@@ -99,7 +140,7 @@ func NewYandexDBCluster(
 	}
 
 	if err != nil {
-		return nil, errors.Wrap(err, "Error creating YDB connection holder")
+		return nil, errors.Wrap(err, "Failed to create YDB connection")
 	}
 
 	return &YandexDBCluster{
@@ -109,6 +150,9 @@ func NewYandexDBCluster(
 		yqlUpsertSrcDstAcc:  expandYql(yqlUpsertSrcDstAccount),
 		yqlInsertAccount:    expandYql(yqlInsertAccount),
 		yqlSelectBalanceAcc: expandYql(yqlSelectBalanceAccount),
+		transferIdHashing:   envTransferIdHashing(),
+		partitionsMaxSize:   envPartitionsMaxSize(),
+		partitionsMinCount:  envPartitionsMinCount(),
 	}, nil
 }
 
@@ -188,10 +232,14 @@ func (ydbCluster *YandexDBCluster) FetchSettings() (Settings, error) {
 	return clusterSettins, nil
 }
 
-func transferIdToHash(transferId *model.TransferId) string {
-	hasher := sha1.New()
-	hasher.Write(transferId[:])
-	return base64.URLEncoding.EncodeToString(hasher.Sum(nil))
+func convertTransferId(useHash bool, transferId *model.TransferId) string {
+	if useHash {
+		hasher := sha1.New()
+		hasher.Write(transferId[:])
+		return base64.URLEncoding.EncodeToString(hasher.Sum(nil))
+	} else {
+		return transferId.String()
+	}
 }
 
 func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
@@ -204,7 +252,7 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	defer ctxCloseFn()
 
 	amount := transfer.Amount.UnscaledBig().Int64()
-	transferId := transferIdToHash(&transfer.Id)
+	transferId := convertTransferId(ydbCluster.transferIdHashing, &transfer.Id)
 
 	if err = ydbCluster.ydbConnection.Table().DoTx(
 		ydbContext,
@@ -577,35 +625,16 @@ func (ydbCluster *YandexDBCluster) BootstrapDB(count uint64, seed int) error {
 		return err
 	}
 
-	if err = createSettingsTable(
-		ydbContext,
-		ydbCluster.ydbConnection.Table(),
-		prefix,
-	); err != nil {
+	if err = ydbCluster.createSettingsTable(ydbContext, prefix); err != nil {
 		return err
 	}
-
-	if err = createAccountTable(
-		ydbContext,
-		ydbCluster.ydbConnection.Table(),
-		prefix,
-	); err != nil {
+	if err = ydbCluster.createAccountTable(ydbContext, prefix); err != nil {
 		return err
 	}
-
-	if err = createTransferTable(
-		ydbContext,
-		ydbCluster.ydbConnection.Table(),
-		prefix,
-	); err != nil {
+	if err = ydbCluster.createTransferTable(ydbContext, prefix); err != nil {
 		return err
 	}
-
-	if err = createChecksumTable(
-		ydbContext,
-		ydbCluster.ydbConnection.Table(),
-		prefix,
-	); err != nil {
+	if err = ydbCluster.createChecksumTable(ydbContext, prefix); err != nil {
 		return err
 	}
 
@@ -621,15 +650,15 @@ func (ydbCluster *YandexDBCluster) BootstrapDB(count uint64, seed int) error {
 	return nil
 }
 
-func createSettingsTable( //nolint:dupl // because it golang
+func (ydbCluster *YandexDBCluster) createSettingsTable( //nolint:dupl // because it golang
 	ydbContext context.Context,
-	ydbClient table.Client, prefix string,
+	prefix string,
 ) error {
 	var err error
 
 	tabname := path.Join(prefix, "settings")
 	if err = recreateTable(
-		ydbContext, ydbClient, tabname,
+		ydbContext, ydbCluster.ydbConnection.Table(), tabname,
 		func(ctx context.Context, session table.Session) error {
 			if err = session.CreateTable(
 				ctx, tabname,
@@ -649,15 +678,15 @@ func createSettingsTable( //nolint:dupl // because it golang
 	return nil
 }
 
-func createAccountTable(
+func (ydbCluster *YandexDBCluster) createAccountTable(
 	ydbContext context.Context,
-	ydbClient table.Client, prefix string,
+	prefix string,
 ) error {
 	var err error
 
 	tabname := path.Join(prefix, "account")
 	if err = recreateTable(
-		ydbContext, ydbClient, tabname,
+		ydbContext, ydbCluster.ydbConnection.Table(), tabname,
 		func(ctx context.Context, session table.Session) error {
 			if err = session.CreateTable(
 				ctx, tabname,
@@ -668,8 +697,8 @@ func createAccountTable(
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(partitionsMinCount),
-					options.WithPartitionSizeMb(partitionsMaxMbytes),
+					options.WithMinPartitionsCount(uint64(ydbCluster.partitionsMinCount)),
+					options.WithPartitionSizeMb(uint64(ydbCluster.partitionsMaxSize)),
 				),
 			); err != nil {
 				return errors.Wrap(err, "failed to create table")
@@ -684,15 +713,15 @@ func createAccountTable(
 	return nil
 }
 
-func createTransferTable(
+func (ydbCluster *YandexDBCluster) createTransferTable(
 	ydbContext context.Context,
-	ydbClient table.Client, prefix string,
+	prefix string,
 ) error {
 	var err error
 
 	tabname := path.Join(prefix, "transfer")
 	if err = recreateTable(
-		ydbContext, ydbClient, tabname,
+		ydbContext, ydbCluster.ydbConnection.Table(), tabname,
 		func(ctx context.Context, session table.Session) error {
 			if err = session.CreateTable(
 				ctx, tabname,
@@ -709,8 +738,8 @@ func createTransferTable(
 				options.WithPartitioningSettings(
 					options.WithPartitioningByLoad(options.FeatureEnabled),
 					options.WithPartitioningBySize(options.FeatureEnabled),
-					options.WithMinPartitionsCount(partitionsMinCount),
-					options.WithPartitionSizeMb(partitionsMaxMbytes),
+					options.WithMinPartitionsCount(uint64(ydbCluster.partitionsMinCount)),
+					options.WithPartitionSizeMb(uint64(ydbCluster.partitionsMaxSize)),
 				),
 			); err != nil {
 				return errors.Wrap(err, "failed to create table")
@@ -725,15 +754,15 @@ func createTransferTable(
 	return nil
 }
 
-func createChecksumTable( //nolint:dupl // because it golang
+func (ydbCluster *YandexDBCluster) createChecksumTable( //nolint:dupl // because it golang
 	ydbContext context.Context,
-	ydbClient table.Client, prefix string,
+	prefix string,
 ) error {
 	var err error
 
 	tabname := path.Join(prefix, "checksum")
 	if err = recreateTable(
-		ydbContext, ydbClient, tabname,
+		ydbContext, ydbCluster.ydbConnection.Table(), tabname,
 		func(ctx context.Context, session table.Session) error {
 			if err = session.CreateTable(
 				ctx, tabname,
