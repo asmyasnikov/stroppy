@@ -50,7 +50,9 @@ type YandexDBCluster struct {
 	yqlSelectSrcDstAcc  string
 	yqlUpsertSrcDstAcc  string
 	yqlSelectBalanceAcc string
+	yqlMagicTransfer    string
 	transferIdHashing   bool
+	transferUseMagic    bool
 	partitionsMaxSize   int
 	partitionsMinCount  int
 }
@@ -77,6 +79,17 @@ func envTransferIdHashing() bool {
 		}
 	}
 	llog.Infoln("YDB transfer id hashing is DISABLED")
+	return false
+}
+
+func envTransferUseMagic() bool {
+	if value, ok := os.LookupEnv("YDB_STROPPY_TRANSFER_MAGIC"); ok {
+		if (value == "1") || (value == "Y") {
+			llog.Infoln("YDB transfer magic is ENABLED")
+			return true
+		}
+	}
+	llog.Infoln("YDB transfer magic is DISABLED")
 	return false
 }
 
@@ -151,7 +164,9 @@ func NewYandexDBCluster(
 		yqlUpsertSrcDstAcc:  expandYql(yqlUpsertSrcDstAccount),
 		yqlInsertAccount:    expandYql(yqlInsertAccount),
 		yqlSelectBalanceAcc: expandYql(yqlSelectBalanceAccount),
+		yqlMagicTransfer:    expandYql(yqlMagicTransfer),
 		transferIdHashing:   envTransferIdHashing(),
+		transferUseMagic:    envTransferUseMagic(),
 		partitionsMaxSize:   envPartitionsMaxSize(),
 		partitionsMinCount:  envPartitionsMinCount(),
 	}, nil
@@ -249,6 +264,174 @@ func convertTransferId(useHash bool, transferId *model.TransferId) string {
 	}
 }
 
+func (ydbCluster *YandexDBCluster) atomicTransferBasic(
+	transfer *model.Transfer,
+	ctx context.Context,
+	tx table.TransactionActor,
+	amount int64,
+	transferId string,
+) (err error) {
+	// Select from account table
+	var query result.Result
+	query, err = tx.Execute(
+		ctx, ydbCluster.yqlSelectSrcDstAcc,
+		table.NewQueryParameters(
+			table.ValueParam("src_bic",
+				types.BytesValueFromString(transfer.Acs[0].Bic)),
+			table.ValueParam("src_ban",
+				types.BytesValueFromString(transfer.Acs[0].Ban)),
+			table.ValueParam("dst_bic",
+				types.BytesValueFromString(transfer.Acs[1].Bic)),
+			table.ValueParam("dst_ban",
+				types.BytesValueFromString(transfer.Acs[1].Ban)),
+		),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return errors.Wrap(err, "failed to execute transaction")
+	}
+	defer func() {
+		_ = query.Close()
+	}()
+
+	for query.NextResultSet(ctx) {
+		// Expect to have 2 rows - source and destination accounts.
+		// In case of 0 or 1 rows something is missing.
+		if query.CurrentResultSet().RowCount() != 2 { //nolint:gomnd // not magic number
+			llog.Tracef(
+				"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
+				transfer.Acs[0].Bic, transfer.Acs[0].Ban,
+				transfer.Acs[1].Bic, transfer.Acs[1].Ban,
+			)
+
+			return ErrNoRows
+		}
+		for query.NextRow() {
+			var srcdst int32
+			var balance *int64
+			if err = query.Scan(&srcdst, &balance); err != nil {
+				return errors.Wrap(err, "failed to scan account balance")
+			}
+			if balance == nil {
+				return errIllegalNilOutput
+			}
+			switch srcdst {
+			case 1: // need to check the source account balance
+				if *balance < amount {
+					return ErrInsufficientFunds
+				}
+			case 2: //nolint:gomnd // nothing to do on the destination account
+			default: // something strange to be reported
+				return merry.Errorf(
+					"Illegal srcdst value %d for srcdst account statement",
+					srcdst,
+				)
+			}
+		}
+	}
+	if err = query.Err(); err != nil {
+		return errors.Wrap(err, "failed to retrieve query status")
+	}
+
+	// Upsert the new row to the transfer table
+	_, err = tx.Execute(
+		ctx, ydbCluster.yqlUpsertTransfer,
+		table.NewQueryParameters(
+			table.ValueParam("transfer_id",
+				types.BytesValueFromString(transferId)),
+			table.ValueParam("src_bic",
+				types.BytesValueFromString(transfer.Acs[0].Bic)),
+			table.ValueParam("src_ban",
+				types.BytesValueFromString(transfer.Acs[0].Ban)),
+			table.ValueParam("dst_bic",
+				types.BytesValueFromString(transfer.Acs[1].Bic)),
+			table.ValueParam("dst_ban",
+				types.BytesValueFromString(transfer.Acs[1].Ban)),
+			table.ValueParam("amount",
+				types.Int64Value(amount)),
+			table.ValueParam("state",
+				types.BytesValueFromString("complete")),
+		),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return errors.Wrap(err, "failed to execute transaction")
+	}
+
+	// Update two balances in the account table.
+	_, err = tx.Execute(
+		ctx, ydbCluster.yqlUpsertSrcDstAcc,
+		table.NewQueryParameters(
+			table.ValueParam("src_bic",
+				types.BytesValueFromString(transfer.Acs[0].Bic)),
+			table.ValueParam("src_ban",
+				types.BytesValueFromString(transfer.Acs[0].Ban)),
+			table.ValueParam("dst_bic",
+				types.BytesValueFromString(transfer.Acs[1].Bic)),
+			table.ValueParam("dst_ban",
+				types.BytesValueFromString(transfer.Acs[1].Ban)),
+			table.ValueParam("amount",
+				types.Int64Value(transfer.Amount.UnscaledBig().Int64())),
+		),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		return errors.Wrap(err, "failed to execute the basic transfer")
+	}
+	return nil
+}
+
+func (ydbCluster *YandexDBCluster) atomicTransferMagic(
+	transfer *model.Transfer,
+	ctx context.Context,
+	tx table.TransactionActor,
+	amount int64,
+	transferId string,
+) (err error) {
+	// Execute the "magical" single-statement transfer
+	_, err = tx.Execute(
+		ctx, ydbCluster.yqlMagicTransfer,
+		table.NewQueryParameters(
+			table.ValueParam("transfer_id",
+				types.BytesValueFromString(transferId)),
+			table.ValueParam("src_bic",
+				types.BytesValueFromString(transfer.Acs[0].Bic)),
+			table.ValueParam("src_ban",
+				types.BytesValueFromString(transfer.Acs[0].Ban)),
+			table.ValueParam("dst_bic",
+				types.BytesValueFromString(transfer.Acs[1].Bic)),
+			table.ValueParam("dst_ban",
+				types.BytesValueFromString(transfer.Acs[1].Ban)),
+			table.ValueParam("amount",
+				types.Int64Value(amount)),
+			table.ValueParam("state",
+				types.BytesValueFromString("complete")),
+		),
+		options.WithKeepInCache(true),
+	)
+	if err != nil {
+		text := err.Error()
+		if strings.Contains(text, "MISSING_ACCOUNTS") {
+			llog.Tracef(
+				"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
+				transfer.Acs[0].Bic, transfer.Acs[0].Ban,
+				transfer.Acs[1].Bic, transfer.Acs[1].Ban,
+			)
+			return ErrNoRows
+		}
+		if strings.Contains(text, "INSUFFICIENT_FUNDS") {
+			llog.Tracef(
+				"insufficient funds: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
+				transfer.Acs[0].Bic, transfer.Acs[0].Ban,
+				transfer.Acs[1].Bic, transfer.Acs[1].Ban,
+			)
+			return ErrInsufficientFunds
+		}
+		return errors.Wrap(err, "failed to execute the magical transfer")
+	}
+	return nil
+}
+
 func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	transfer *model.Transfer, //nolint
 	clientID uuid.UUID,
@@ -264,115 +447,11 @@ func (ydbCluster *YandexDBCluster) MakeAtomicTransfer(
 	if err = ydbCluster.ydbConnection.Table().DoTx(
 		ydbContext,
 		func(ctx context.Context, tx table.TransactionActor) error {
-			// Select from account table
-			var query result.Result
-			query, err = tx.Execute(
-				ctx, ydbCluster.yqlSelectSrcDstAcc,
-				table.NewQueryParameters(
-					table.ValueParam("src_bic",
-						types.BytesValueFromString(transfer.Acs[0].Bic)),
-					table.ValueParam("src_ban",
-						types.BytesValueFromString(transfer.Acs[0].Ban)),
-					table.ValueParam("dst_bic",
-						types.BytesValueFromString(transfer.Acs[1].Bic)),
-					table.ValueParam("dst_ban",
-						types.BytesValueFromString(transfer.Acs[1].Ban)),
-				),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return errors.Wrap(err, "failed to execute transaction")
+			if ydbCluster.transferUseMagic {
+				return ydbCluster.atomicTransferMagic(transfer, ctx, tx, amount, transferId)
+			} else {
+				return ydbCluster.atomicTransferBasic(transfer, ctx, tx, amount, transferId)
 			}
-			defer func() {
-				_ = query.Close()
-			}()
-
-			for query.NextResultSet(ctx) {
-				// Expect to have 2 rows - source and destination accounts.
-				// In case of 0 or 1 rows something is missing.
-				if query.CurrentResultSet().RowCount() != 2 { //nolint:gomnd // not magic number
-					llog.Tracef(
-						"missing transfer: src_bic: %s, src_ban: %s dst_bic: %s, dst_ban: %s",
-						transfer.Acs[0].Bic, transfer.Acs[0].Ban,
-						transfer.Acs[1].Bic, transfer.Acs[1].Ban,
-					)
-
-					return ErrNoRows
-				}
-				for query.NextRow() {
-					var srcdst int32
-					var balance *int64
-					if err = query.Scan(&srcdst, &balance); err != nil {
-						return errors.Wrap(err, "failed to scan account balance")
-					}
-					if balance == nil {
-						return errIllegalNilOutput
-					}
-					switch srcdst {
-					case 1: // need to check the source account balance
-						if *balance < amount {
-							return ErrInsufficientFunds
-						}
-					case 2: //nolint:gomnd // nothing to do on the destination account
-					default: // something strange to be reported
-						return merry.Errorf(
-							"Illegal srcdst value %d for srcdst account statement",
-							srcdst,
-						)
-					}
-				}
-			}
-			if err = query.Err(); err != nil {
-				return errors.Wrap(err, "failed to retrieve query status")
-			}
-
-			// Upsert the new row to the transfer table
-			_, err = tx.Execute(
-				ctx, ydbCluster.yqlUpsertTransfer,
-				table.NewQueryParameters(
-					table.ValueParam("transfer_id",
-						types.BytesValueFromString(transferId)),
-					table.ValueParam("src_bic",
-						types.BytesValueFromString(transfer.Acs[0].Bic)),
-					table.ValueParam("src_ban",
-						types.BytesValueFromString(transfer.Acs[0].Ban)),
-					table.ValueParam("dst_bic",
-						types.BytesValueFromString(transfer.Acs[1].Bic)),
-					table.ValueParam("dst_ban",
-						types.BytesValueFromString(transfer.Acs[1].Ban)),
-					table.ValueParam("amount",
-						types.Int64Value(amount)),
-					table.ValueParam("state",
-						types.BytesValueFromString("complete")),
-				),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return errors.Wrap(err, "failed to execute transaction")
-			}
-
-			// Update two balances in the account table.
-			_, err = tx.Execute(
-				ctx, ydbCluster.yqlUpsertSrcDstAcc,
-				table.NewQueryParameters(
-					table.ValueParam("src_bic",
-						types.BytesValueFromString(transfer.Acs[0].Bic)),
-					table.ValueParam("src_ban",
-						types.BytesValueFromString(transfer.Acs[0].Ban)),
-					table.ValueParam("dst_bic",
-						types.BytesValueFromString(transfer.Acs[1].Bic)),
-					table.ValueParam("dst_ban",
-						types.BytesValueFromString(transfer.Acs[1].Ban)),
-					table.ValueParam("amount",
-						types.Int64Value(transfer.Amount.UnscaledBig().Int64())),
-				),
-				options.WithKeepInCache(true),
-			)
-			if err != nil {
-				return errors.Wrap(err, "failed to execute transaction")
-			}
-
-			return nil
 		},
 		// Mark the transaction idempotent to allow retries.
 		table.WithIdempotent(),
