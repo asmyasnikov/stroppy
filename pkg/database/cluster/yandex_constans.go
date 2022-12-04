@@ -19,7 +19,7 @@ $shared_select = (
     SELECT 
         bic,
         ban,
-        balance - $amount AS balance
+        Ensure(balance - $amount, balance >= $amount, 'INSUFFICIENT_FUNDS') AS balance
     FROM "&{stroppyDir}/account"
     WHERE bic = $src_bic AND ban = $src_ban
     UNION ALL
@@ -33,9 +33,6 @@ $shared_select = (
 
 DISCARD SELECT Ensure(2, cnt=2, 'MISSING_ACCOUNTS')
 FROM (SELECT COUNT(*) AS cnt FROM $shared_select);
-
-DISCARD SELECT Ensure(balance, balance >= $amount, 'INSUFFICIENT_FUNDS')
-FROM $shared_select;
 
 UPSERT INTO "&{stroppyDir}/account"
 SELECT * FROM $shared_select;
