@@ -2,16 +2,17 @@ package cluster
 
 import (
 	"context"
+	"crypto/sha1"
+	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
-
-	"crypto/sha1"
-	"encoding/base64"
 
 	"github.com/ansel1/merry/v2"
 	"github.com/google/uuid"
@@ -25,8 +26,9 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/result"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/result/named"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
-	"gitlab.com/picodata/stroppy/internal/model"
 	"gopkg.in/inf.v0"
+
+	"gitlab.com/picodata/stroppy/internal/model"
 )
 
 const (
@@ -37,6 +39,26 @@ const (
 	defaultTimeout = time.Second * 10
 	// extra connections in the pool.
 	poolSizeOverhead = 10
+)
+
+var (
+	//go:embed ydb_insert_account.yql
+	yqlInsertAccount string
+
+	//go:embed ydb_transfer.yql
+	yqlTransfer string
+
+	//go:embed ydb_upsert_transfer.yql
+	yqlUpsertTransfer string
+
+	//go:embed ydb_select_src_dst_account.yql
+	yqlSelectSrcDstAccount string
+
+	//go:embed ydb_upsert_src_dst_account.yql
+	yqlUpsertSrcDstAccount string
+
+	//go:embed ydb_select_balance_account.yql
+	yqlSelectBalanceAccount string
 )
 
 var errIllegalNilOutput = errors.New(
@@ -98,7 +120,7 @@ func envPartitionsMinCount() int {
 	if value, ok := os.LookupEnv("YDB_STROPPY_PARTITIONS_COUNT"); ok {
 		x, err := strconv.Atoi(value)
 		if err != nil || x <= 0 || x > 10000 {
-			llog.Warningln("Illegal value [%s] passed in YDB_STROPPY_PARTITIONS_COUNT, ignored", value)
+			llog.Warningln("Illegal value [", value, "] passed in YDB_STROPPY_PARTITIONS_COUNT, ignored")
 		} else {
 			ret = x
 		}
@@ -112,7 +134,7 @@ func envPartitionsMaxSize() int {
 	if value, ok := os.LookupEnv("YDB_STROPPY_PARTITIONS_SIZE"); ok {
 		x, err := strconv.Atoi(value)
 		if err != nil || x <= 0 || x > 10000 {
-			llog.Warningln("Illegal value [%s] passed in YDB_STROPPY_PARTITIONS_SIZE, ignored", value)
+			llog.Warningln("Illegal value [", value, "] passed in YDB_STROPPY_PARTITIONS_SIZE, ignored")
 		} else {
 			ret = x
 		}
@@ -164,7 +186,7 @@ func NewYandexDBCluster(
 		yqlUpsertSrcDstAcc:  expandYql(yqlUpsertSrcDstAccount),
 		yqlInsertAccount:    expandYql(yqlInsertAccount),
 		yqlSelectBalanceAcc: expandYql(yqlSelectBalanceAccount),
-		yqlMagicTransfer:    expandYql(yqlMagicTransfer),
+		yqlMagicTransfer:    expandYql(yqlTransfer),
 		transferIdHashing:   envTransferIdHashing(),
 		transferUseMagic:    envTransferUseMagic(),
 		partitionsMaxSize:   envPartitionsMaxSize(),
@@ -1106,11 +1128,21 @@ func (ydbCluster *YandexDBCluster) StartStatisticsCollect(_ time.Duration) error
 	return nil
 }
 
+var (
+	// Template for generating YQL queries
+	ydbYqlTemplate = template.New("").Funcs(template.FuncMap{
+		"stroppyDir": func() string {
+			return stroppyDir
+		},
+	})
+)
+
 // Substitute directory path into the YQL template,
 // replacing the double quote characters with backticks.
 func expandYql(query string) string {
-	retval := strings.ReplaceAll(query, "&{stroppyDir}", stroppyDir)
-	retval = strings.ReplaceAll(retval, `"`, "`")
-
-	return retval
+	var buffer strings.Builder
+	if err := template.Must(ydbYqlTemplate.Parse(query)).Execute(&buffer, nil); err != nil {
+		panic(err)
+	}
+	return buffer.String()
 }

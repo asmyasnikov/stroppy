@@ -1,0 +1,24 @@
+DECLARE $src_bic AS String;
+DECLARE $src_ban AS String;
+DECLARE $dst_bic AS String;
+DECLARE $dst_ban AS String;
+DECLARE $amount AS Int64;
+
+$shared_select = (
+    SELECT
+        bic,
+        ban,
+        balance - $amount AS balance
+    FROM `{{ stroppyDir }}/account`
+    WHERE bic = $src_bic AND ban = $src_ban
+    UNION ALL
+    SELECT
+        bic,
+        ban,
+        balance + $amount AS balance
+    FROM `{{ stroppyDir }}/account`
+    WHERE bic = $dst_bic AND ban = $dst_ban
+);
+
+UPSERT INTO `{{ stroppyDir }}/account`
+SELECT * FROM $shared_select;
